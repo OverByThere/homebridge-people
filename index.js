@@ -225,7 +225,7 @@ PeopleAccessory.prototype.ping = function() {
                         that.log(that.target+' Unreachable/not here');
                     }
                     else {
-                        if(/^"(.*)Destination Host Unreachable(.*)"$/.test(res.output) || /^"(.*)test(.*)"$/.test(res.output)) {
+                        if(/^"(.*)Destination Host Unreachable(.*)"$/.test(res.output)) {
                             that.log(that.target+' Unreachable/not here');
                         }
                         else {
