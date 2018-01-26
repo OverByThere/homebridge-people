@@ -3,6 +3,7 @@ var moment = require('moment');
 var request = require("request");
 var http = require('http');
 var url = require('url');
+var os = require('os');
 var DEFAULT_REQUEST_TIMEOUT = 10000;
 var SENSOR_ANYONE = 'Anyone';
 var SENSOR_NOONE = 'No One';
@@ -74,48 +75,48 @@ PeoplePlatform.prototype = {
             var theUrlParams = theUrlParts.query;
             var body = [];
             request.on('error', (function(err) {
-              this.log("WebHook error: %s.", err);
-            }).bind(this)).on('data', function(chunk) {
-              body.push(chunk);
-            }).on('end', (function() {
-              body = Buffer.concat(body).toString();
-
-              response.on('error', function(err) {
                 this.log("WebHook error: %s.", err);
-              });
+            }).bind(this)).on('data', function(chunk) {
+                body.push(chunk);
+            }).on('end', (function() {
+                body = Buffer.concat(body).toString();
 
-              response.statusCode = 200;
-              response.setHeader('Content-Type', 'application/json');
+                response.on('error', function(err) {
+                    this.log("WebHook error: %s.", err);
+                });
 
-              if(!theUrlParams.sensor || !theUrlParams.state) {
-                response.statusCode = 404;
-                response.setHeader("Content-Type", "text/plain");
-                var errorText = "WebHook error: No sensor or state specified in request.";
-                this.log(errorText);
-                response.write(errorText);
-                response.end();
-              }
-              else {
-                var sensor = theUrlParams.sensor.toLowerCase();
-                var newState = (theUrlParams.state == "true");
-                this.log('Received hook for ' + sensor + ' -> ' + newState);
-                var responseBody = {
-                  success: true
-                };
-                for(var i = 0; i < this.peopleAccessories.length; i++){
-                  var peopleAccessory = this.peopleAccessories[i];
-                  var target = peopleAccessory.target
-                  if(peopleAccessory.name.toLowerCase() === sensor) {
-                    this.clearWebhookQueueForTarget(target);
-                    this.webhookQueue.push({"target": target, "newState": newState, "timeoutvar": setTimeout((function(){
-                        this.runWebhookFromQueueForTarget(target);
-                    }).bind(this),  peopleAccessory.ignoreReEnterExitSeconds * 1000)});
-                    break;
-                  }
+                response.statusCode = 200;
+                response.setHeader('Content-Type', 'application/json');
+
+                if(!theUrlParams.sensor || !theUrlParams.state) {
+                    response.statusCode = 404;
+                    response.setHeader("Content-Type", "text/plain");
+                    var errorText = "WebHook error: No sensor or state specified in request.";
+                    this.log(errorText);
+                    response.write(errorText);
+                    response.end();
                 }
-                response.write(JSON.stringify(responseBody));
-                response.end();
-              }
+                else {
+                    var sensor = theUrlParams.sensor.toLowerCase();
+                    var newState = (theUrlParams.state == "true");
+                    this.log('Received hook for ' + sensor + ' -> ' + newState);
+                    var responseBody = {
+                        success: true
+                    };
+                    for(var i = 0; i < this.peopleAccessories.length; i++){
+                        var peopleAccessory = this.peopleAccessories[i];
+                        var target = peopleAccessory.target
+                        if(peopleAccessory.name.toLowerCase() === sensor) {
+                            this.clearWebhookQueueForTarget(target);
+                            this.webhookQueue.push({"target": target, "newState": newState, "timeoutvar": setTimeout((function(){
+                                this.runWebhookFromQueueForTarget(target);
+                            }).bind(this),  peopleAccessory.ignoreReEnterExitSeconds * 1000)});
+                            break;
+                        }
+                    }
+                    response.write(JSON.stringify(responseBody));
+                    response.end();
+                }
             }).bind(this));
         }).bind(this)).listen(this.webhookPort);
         this.log("WebHook: Started server on port '%s'.", this.webhookPort);
@@ -165,6 +166,7 @@ function PeopleAccessory(log, config, platform) {
     this.name = config['name'];
     this.target = config['target'];
     this.platform = platform;
+    this.firewalled = config['firewalled'] || false;
     this.threshold = config['threshold'] || this.platform.threshold;
     this.pingInterval = config['pingInterval'] || this.platform.pingInterval;
     this.ignoreReEnterExitSeconds = config['ignoreReEnterExitSeconds'] || this.platform.ignoreReEnterExitSeconds;
@@ -172,8 +174,8 @@ function PeopleAccessory(log, config, platform) {
 
     this.service = new Service.OccupancySensor(this.name);
     this.service
-        .getCharacteristic(Characteristic.OccupancyDetected)
-        .on('get', this.getState.bind(this));
+    .getCharacteristic(Characteristic.OccupancyDetected)
+    .on('get', this.getState.bind(this));
 
     this.initStateCache();
 
@@ -183,10 +185,10 @@ function PeopleAccessory(log, config, platform) {
 }
 
 PeopleAccessory.encodeState = function(state) {
-  if (state)
-      return Characteristic.OccupancyDetected.OCCUPANCY_DETECTED;
-  else
-      return Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED;
+    if (state)
+    return Characteristic.OccupancyDetected.OCCUPANCY_DETECTED;
+    else
+    return Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED;
 }
 
 PeopleAccessory.prototype.getState = function(callback) {
@@ -209,19 +211,50 @@ PeopleAccessory.prototype.isActive = function() {
 }
 
 PeopleAccessory.prototype.ping = function() {
+    var that = this;
     if(this.webhookIsOutdated()) {
-        ping.sys.probe(this.target, function(state){
-            if(this.webhookIsOutdated()) {
-                if (state) {
-                    this.platform.storage.setItemSync('lastSuccessfulPing_' + this.target, Date.now());
+        var ourExtra = [];
+        if(that.firewalled) {
+            if(os.platform()=='darwin' || os.platform()=='freebsd') { ourExtra = ['c','1']; }
+            ping.promise.probe(this.target, {
+                timeout: 10,
+                extra: ourExtra,
+            }).then(function (res) {
+                require('dns').lookup(that.target, function (err, add, fam) {
+                    if(/^(.*)ENOTFOUND(.*)$/.test(err)) {
+                        that.log(that.target+' Unreachable/not here');
+                    }
+                    else {
+                        if(/^"(.*)Destination Host Unreachable(.*)"$/.test(res.output) || /^"(.*)test(.*)"$/.test(res.output)) {
+                            that.log(that.target+' Unreachable/not here');
+                        }
+                        else {
+                            that.log(that.target+' Reachable');
+                            that.platform.storage.setItemSync('lastSuccessfulPing_' + that.target, Date.now());
+                        }
+                    }
+                });
+                if(that.successfulPingOccurredAfterWebhook()) {
+                    var newState = that.isActive();
+                    that.setNewState(newState);
                 }
-                if(this.successfulPingOccurredAfterWebhook()) {
-                    var newState = this.isActive();
-                    this.setNewState(newState);
+                setTimeout(PeopleAccessory.prototype.ping.bind(that), that.pingInterval);
+            });
+        }
+        else {
+            ping.sys.probe(this.target, function(state){
+                if(this.webhookIsOutdated()) {
+                    if (state) {
+                        this.platform.storage.setItemSync('lastSuccessfulPing_' + this.target, Date.now());
+                    }
+                    if(this.successfulPingOccurredAfterWebhook()) {
+                        var newState = this.isActive();
+                        this.setNewState(newState);
+                    }
                 }
-            }
-            setTimeout(PeopleAccessory.prototype.ping.bind(this), this.pingInterval);
-        }.bind(this));
+                setTimeout(PeopleAccessory.prototype.ping.bind(this), this.pingInterval);
+            }.bind(this));
+        }
     }
     else {
         setTimeout(PeopleAccessory.prototype.ping.bind(this), this.pingInterval);
@@ -295,12 +328,12 @@ function PeopleAllAccessory(log, name, platform) {
 
     this.service = new Service.OccupancySensor(this.name);
     this.service
-        .getCharacteristic(Characteristic.OccupancyDetected)
-        .on('get', this.getState.bind(this));
+    .getCharacteristic(Characteristic.OccupancyDetected)
+    .on('get', this.getState.bind(this));
 }
 
 PeopleAllAccessory.prototype.getState = function(callback) {
-  callback(null, PeopleAccessory.encodeState(this.getStateFromCache()));
+    callback(null, PeopleAccessory.encodeState(this.getStateFromCache()));
 }
 
 PeopleAllAccessory.prototype.getStateFromCache = function() {
